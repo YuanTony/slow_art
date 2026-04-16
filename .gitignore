@@ -11,4 +11,5 @@
 /nohup.out
 __pycache__/
 *.db
+!artworks.db
 .venv/
