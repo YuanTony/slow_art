@@ -1,0 +1,14 @@
+/target/
+/artworks_audio.db
+/output/
+/downloads/
+/bot.pid
+/run.err
+/run.log
+/config.toml
+*.parquet
+/test.db
+/nohup.out
+__pycache__/
+*.db
+.venv/

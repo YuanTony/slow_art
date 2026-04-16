@@ -1,0 +1,55 @@
+[telegram]
+enabled = true
+bot_token = "PASTE_TELEGRAM_BOT_TOKEN_HERE"
+poll_timeout_seconds = 30
+download_dir = "downloads"
+
+[discord]
+enabled = false
+bot_token = "PASTE_DISCORD_BOT_TOKEN_HERE"
+
+[database]
+artworks_db_path = "artworks.db"
+
+[session]
+countdown_minutes = 10
+max_history_messages = 24
+auto_accept_confidence = 0.86
+confirm_confidence = 0.62
+min_top_gap = 0.12
+
+[audio_guide]
+enabled = true
+museum = "met"
+
+[llm]
+base_url = "https://your-llm-provider/v1/chat/completions"
+api_key = "YOUR_API_KEY"
+model = "your-model"
+
+[embedding]
+base_url = "https://your-llm-provider/v1/embeddings"
+api_key = "YOUR_API_KEY"
+model = "gemini-embedding-001"
+dimensions = 768
+min_match_score = 0.80
+
+[asr]
+enabled = true
+base_url = "https://your-llm-provider/v1/audio/transcriptions"
+api_key = "YOUR_API_KEY"
+model = "your-asr-model"
+
+[ocr]
+enabled = true
+base_url = "https://your-llm-provider/v1/chat/completions"
+api_key = "YOUR_API_KEY"
+model = "your-vision-model"
+
+[tts]
+enabled = true
+base_url = "https://your-llm-provider/v1/audio/speech"
+api_key = "YOUR_API_KEY"
+model = "your-tts-model"
+voice = "coral"
+format = "mp3"
