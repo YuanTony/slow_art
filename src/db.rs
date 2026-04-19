@@ -13,7 +13,7 @@ pub fn load_artworks(path: &str) -> Result<Vec<Artwork>> {
         Connection::open(path).with_context(|| format!("opening SQLite database at {path}"))?;
     ensure_schema(&conn)?;
     let mut stmt = conn.prepare(
-        "SELECT id, audio_guide_id, official_name, description, description_level FROM artworks ORDER BY official_name ASC",
+        "SELECT id, audio_guide_id, official_name, description, description_level, is_highlight, gallery_number FROM artworks ORDER BY official_name ASC",
     )?;
     let rows = stmt.query_map([], |row| {
         Ok(Artwork {
@@ -22,6 +22,8 @@ pub fn load_artworks(path: &str) -> Result<Vec<Artwork>> {
             official_name: row.get(2)?,
             description: row.get(3)?,
             description_level: row.get(4)?,
+            is_highlight: row.get::<_, i64>(5).unwrap_or(0) != 0,
+            gallery_number: row.get::<_, String>(6).unwrap_or_default(),
         })
     })?;
 
@@ -37,7 +39,7 @@ pub fn search_artworks_fts(path: &str, query: &str, limit: usize) -> Result<Vec<
         Connection::open(path).with_context(|| format!("opening SQLite database at {path}"))?;
     ensure_schema(&conn)?;
     let mut stmt = conn.prepare(
-        "SELECT a.id, a.audio_guide_id, a.official_name, a.description, a.description_level
+        "SELECT a.id, a.audio_guide_id, a.official_name, a.description, a.description_level, a.is_highlight, a.gallery_number
          FROM artworks_fts f
          JOIN artworks a ON a.id = f.rowid
          WHERE artworks_fts MATCH ?
@@ -52,6 +54,8 @@ pub fn search_artworks_fts(path: &str, query: &str, limit: usize) -> Result<Vec<
             official_name: row.get(2)?,
             description: row.get(3)?,
             description_level: row.get(4)?,
+            is_highlight: row.get::<_, i64>(5).unwrap_or(0) != 0,
+            gallery_number: row.get::<_, String>(6).unwrap_or_default(),
         })
     })?;
 
@@ -86,7 +90,7 @@ pub fn search_artworks_by_embedding(
     ensure_schema(&conn)?;
 
     let mut stmt = conn.prepare(
-        "SELECT a.id, a.audio_guide_id, a.official_name, a.description, a.description_level, e.distance
+        "SELECT a.id, a.audio_guide_id, a.official_name, a.description, a.description_level, e.distance, a.is_highlight, a.gallery_number
          FROM artwork_embeddings e
          JOIN artworks a ON a.id = e.artwork_id
          WHERE e.embedding MATCH ?
@@ -102,6 +106,8 @@ pub fn search_artworks_by_embedding(
                 official_name: row.get(2)?,
                 description: row.get(3)?,
                 description_level: row.get(4)?,
+                is_highlight: row.get::<_, i64>(6).unwrap_or(0) != 0,
+                gallery_number: row.get::<_, String>(7).unwrap_or_default(),
             },
             row.get::<_, f64>(5)?,
         ))
@@ -172,6 +178,16 @@ fn ensure_schema(conn: &Connection) -> Result<()> {
     conn.execute(
         "UPDATE artworks SET description_level = 3 WHERE description_level = 1 AND length(description) > 2000",
         [],
+    )
+    .ok();
+
+    // Migration: add is_highlight and gallery_number columns
+    conn.execute_batch(
+        "ALTER TABLE artworks ADD COLUMN is_highlight INTEGER NOT NULL DEFAULT 0;",
+    )
+    .ok();
+    conn.execute_batch(
+        "ALTER TABLE artworks ADD COLUMN gallery_number TEXT NOT NULL DEFAULT '';",
     )
     .ok();
 
