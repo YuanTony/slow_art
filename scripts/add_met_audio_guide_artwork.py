@@ -11,28 +11,11 @@ from urllib.request import Request, urlopen
 
 from research_artwork import run_agent_research, run_agent_shallow_research
 from hf_embeddings import lookup_embedding, insert_embedding, enable_vec
+from hf_metadata import lookup_display_info
 
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_DB = ROOT / "artworks.db"
 DEFAULT_OUT_DIR = ROOT / "output"
-
-def _read_base_schema():
-    """Read base schema (artworks + FTS) from schema.sql, skipping vec0 lines."""
-    sql_path = ROOT / "schema.sql"
-    lines = sql_path.read_text().splitlines()
-    parts = []
-    skip = False
-    for line in lines:
-        if "USING vec0" in line:
-            skip = True
-        if skip:
-            if line.strip() == ");":
-                skip = False
-            continue
-        parts.append(line)
-    return "\n".join(parts)
-
-SCHEMA = _read_base_schema()
 
 NON_ARTWORK_HINTS = [
     "welcome",
@@ -185,7 +168,6 @@ def main():
     result = {"audio_guide_id": args.audio_id, "url": url}
 
     conn = sqlite3.connect(args.db)
-    conn.executescript(SCHEMA)
     cur = conn.cursor()
 
     time.sleep(args.sleep)
@@ -208,6 +190,12 @@ def main():
     met_text = extract_met_full_text(html)
     crd_id = extract_crd_id(html)
     met_object_meta = fetch_met_collection_metadata(crd_id) if crd_id else ""
+    if crd_id:
+        hl, gn = lookup_display_info(crd_id)
+        is_highlight = 1 if hl else 0
+        gallery_number = gn
+    else:
+        is_highlight, gallery_number = 0, ""
     is_artwork, filter_reason = looks_like_artwork(title, met_text)
 
     result.update({
@@ -267,27 +255,29 @@ def main():
     if crd_id is not None:
         cur.execute(
             """
-            INSERT INTO artworks (id, audio_guide_id, official_name, search_text, description, description_level)
-            VALUES (?, ?, ?, ?, ?, ?)
+            INSERT INTO artworks (id, audio_guide_id, official_name, search_text, description, description_level, is_highlight, gallery_number)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
               audio_guide_id = excluded.audio_guide_id,
               official_name = excluded.official_name,
               search_text = excluded.search_text,
               description = excluded.description,
-              description_level = excluded.description_level
+              description_level = excluded.description_level,
+              is_highlight = excluded.is_highlight,
+              gallery_number = excluded.gallery_number
             """,
-            (crd_id, args.audio_id, title, search_text, description, args.level),
+            (crd_id, args.audio_id, title, search_text, description, args.level, is_highlight, gallery_number),
         )
     else:
         if args.force:
             cur.execute(
-                "UPDATE artworks SET official_name = ?, search_text = ?, description = ?, description_level = ? WHERE audio_guide_id = ?",
-                (title, search_text, description, args.level, args.audio_id),
+                "UPDATE artworks SET official_name = ?, search_text = ?, description = ?, description_level = ?, is_highlight = ?, gallery_number = ? WHERE audio_guide_id = ?",
+                (title, search_text, description, args.level, is_highlight, gallery_number, args.audio_id),
             )
             if cur.rowcount == 0:
                 cur.execute(
-                    "INSERT INTO artworks (audio_guide_id, official_name, search_text, description, description_level) VALUES (?, ?, ?, ?, ?)",
-                    (args.audio_id, title, search_text, description, args.level),
+                    "INSERT INTO artworks (audio_guide_id, official_name, search_text, description, description_level, is_highlight, gallery_number) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (args.audio_id, title, search_text, description, args.level, is_highlight, gallery_number),
                 )
                 row_id = cur.lastrowid
             else:
@@ -296,8 +286,8 @@ def main():
                 row_id = existing[0] if existing else None
         else:
             cur.execute(
-                "INSERT INTO artworks (audio_guide_id, official_name, search_text, description, description_level) VALUES (?, ?, ?, ?, ?)",
-                (args.audio_id, title, search_text, description, args.level),
+                "INSERT INTO artworks (audio_guide_id, official_name, search_text, description, description_level, is_highlight, gallery_number) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (args.audio_id, title, search_text, description, args.level, is_highlight, gallery_number),
             )
             row_id = cur.lastrowid
 

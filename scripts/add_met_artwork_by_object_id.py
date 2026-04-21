@@ -9,27 +9,11 @@ from urllib.request import Request, urlopen
 
 from research_artwork import run_agent_research, run_agent_shallow_research
 from hf_embeddings import lookup_embedding, insert_embedding, enable_vec
+from hf_metadata import lookup_display_info
 
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_DB = ROOT / "artworks.db"
 
-def _read_base_schema():
-    """Read base schema (artworks + FTS) from schema.sql, skipping vec0 lines."""
-    sql_path = ROOT / "schema.sql"
-    lines = sql_path.read_text().splitlines()
-    parts = []
-    skip = False
-    for line in lines:
-        if "USING vec0" in line:
-            skip = True
-        if skip:
-            if line.strip() == ");":
-                skip = False
-            continue
-        parts.append(line)
-    return "\n".join(parts)
-
-SCHEMA = _read_base_schema()
 def fetch_text(url: str):
     req = Request(url, headers={"User-Agent": "ten-minute-art/1.0"})
     with urlopen(req, timeout=30) as resp:
@@ -143,6 +127,9 @@ def main():
     official_name = (obj.get("title") or f"Met Object {args.object_id}").strip()
     object_url = (obj.get("objectURL") or "").strip()
     met_metadata = build_met_metadata_text(obj)
+    hl, gn = lookup_display_info(args.object_id)
+    is_highlight = 1 if hl else 0
+    gallery_number = gn
 
     if args.no_research:
         args.level = 1
@@ -172,7 +159,6 @@ def main():
     )
 
     conn = sqlite3.connect(args.db)
-    conn.executescript(SCHEMA)
     cur = conn.cursor()
     if not args.force:
         cur.execute("SELECT id, audio_guide_id, official_name FROM artworks WHERE id = ?", (args.object_id,))
@@ -191,16 +177,18 @@ def main():
 
     cur.execute(
         """
-        INSERT INTO artworks (id, audio_guide_id, official_name, search_text, description, description_level)
-        VALUES (?, ?, ?, ?, ?, ?)
+        INSERT INTO artworks (id, audio_guide_id, official_name, search_text, description, description_level, is_highlight, gallery_number)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
           audio_guide_id = excluded.audio_guide_id,
           official_name = excluded.official_name,
           search_text = excluded.search_text,
           description = excluded.description,
-          description_level = excluded.description_level
+          description_level = excluded.description_level,
+          is_highlight = excluded.is_highlight,
+          gallery_number = excluded.gallery_number
         """,
-        (args.object_id, 0, official_name, met_metadata, description, args.level),
+        (args.object_id, 0, official_name, met_metadata, description, args.level, is_highlight, gallery_number),
     )
 
     # Look up and insert pre-computed embedding

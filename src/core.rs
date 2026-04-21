@@ -66,6 +66,7 @@ pub async fn start_session(state: &CoreState, conversation_id: &str) -> CoreResp
             started_at: Instant::now(),
             countdown_minutes: state.config.session.countdown_minutes,
             timer_cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            rejected_artwork_ids: Vec::new(),
         },
     );
     CoreResponse::Messages(vec![ReplyMessage {
@@ -90,6 +91,7 @@ pub async fn handle_text_message(state: &CoreState, msg: IncomingMessage) -> Res
             started_at: Instant::now(),
             countdown_minutes: state.config.session.countdown_minutes,
             timer_cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            rejected_artwork_ids: Vec::new(),
         });
     session.history.push(ChatMessage {
         role: "user".to_string(),
@@ -97,6 +99,7 @@ pub async fn handle_text_message(state: &CoreState, msg: IncomingMessage) -> Res
     });
     truncate_history(session, state.config.session.max_history_messages);
     let stage = session.stage.clone();
+    let excluded_ids = session.rejected_artwork_ids.clone();
     drop(sessions);
 
     let reply = match stage {
@@ -108,7 +111,7 @@ pub async fn handle_text_message(state: &CoreState, msg: IncomingMessage) -> Res
                     .await;
             }
 
-            match identify_artwork_from_text_query(&state.config, &text).await? {
+            match identify_artwork_from_text_query(&state.config, &text, &excluded_ids).await? {
                 ArtworkDecision::AutoAccept { artwork, .. } => {
                     let reply = time_selection_prompt(&artwork);
                     let mut sessions = state.sessions.lock().await;
@@ -159,6 +162,7 @@ pub async fn handle_text_message(state: &CoreState, msg: IncomingMessage) -> Res
                 let reply = "Okay — tell me the title or anything from the museum label, and I’ll try again.".to_string();
                 let mut sessions = state.sessions.lock().await;
                 if let Some(session) = sessions.get_mut(&msg.conversation_id) {
+                    session.rejected_artwork_ids.push(artwork.id);
                     session.stage = SessionStage::WaitingForArtwork;
                     session.history.push(ChatMessage {
                         role: "assistant".to_string(),
@@ -275,7 +279,7 @@ pub async fn handle_text_message(state: &CoreState, msg: IncomingMessage) -> Res
                             .await;
                     }
 
-                    match identify_artwork_from_text_query(&state.config, &query).await? {
+                    match identify_artwork_from_text_query(&state.config, &query, &excluded_ids).await? {
                         ArtworkDecision::AutoAccept { artwork, .. } => {
                             let reply = time_selection_prompt(&artwork);
                             let mut sessions = state.sessions.lock().await;
@@ -374,6 +378,23 @@ fn extract_first_image_url(description: &str) -> Option<String> {
         })
 }
 
+fn extract_met_page_url(artwork: &Artwork) -> String {
+    // Try to find it in the description text
+    for token in artwork.description.split_whitespace() {
+        let cleaned = token.trim_matches(|c: char| {
+            matches!(c, ')' | '(' | ']' | '[' | '}' | '{' | ',' | '.' | ';' | '"' | '\'')
+        });
+        if cleaned.starts_with("https://www.metmuseum.org/art/collection/search/") {
+            return cleaned.to_string();
+        }
+    }
+    // Fall back to constructing from ID
+    format!(
+        "https://www.metmuseum.org/art/collection/search/{}",
+        artwork.id
+    )
+}
+
 fn time_selection_prompt(artwork: &Artwork) -> String {
     let mut reply = format!(
         "Got it — looks like you're looking at \"{}\".\n\nHow long would you like to discuss it? Reply with a number of minutes (e.g. 1, 3, 5, or 10).",
@@ -382,6 +403,9 @@ fn time_selection_prompt(artwork: &Artwork) -> String {
     if let Some(url) = extract_first_image_url(&artwork.description) {
         reply.push_str("\n\nImage: ");
         reply.push_str(&url);
+    } else {
+        reply.push_str("\n\n");
+        reply.push_str(&extract_met_page_url(artwork));
     }
     reply
 }
@@ -412,10 +436,17 @@ async fn handle_audio_stop_lookup_by_db(
         }]));
     };
 
-    let reply = format!(
+    let mut reply = format!(
         "Got it — audio stop {} is \"{}\". \n\nHow long would you like to discuss it? Reply with a number of minutes (e.g. 1, 3, 5, or 10).",
         stop_number, artwork.official_name
     );
+    if let Some(url) = extract_first_image_url(&artwork.description) {
+        reply.push_str("\n\nImage: ");
+        reply.push_str(&url);
+    } else {
+        reply.push_str("\n\n");
+        reply.push_str(&extract_met_page_url(&artwork));
+    }
 
     let mut sessions = state.sessions.lock().await;
     if let Some(session) = sessions.get_mut(conversation_id) {
@@ -497,23 +528,28 @@ async fn llm_detect_audio_number_or_plain_number(
 async fn identify_artwork_from_text_query(
     config: &Config,
     user_text: &str,
+    excluded_ids: &[i64],
 ) -> Result<ArtworkDecision> {
     #[cfg(feature = "search_image")]
     {
-        if let Some(decision) = identify_artwork_from_embedding(config, user_text).await? {
+        if let Some(decision) = identify_artwork_from_embedding(config, user_text, excluded_ids).await? {
             return Ok(decision);
         }
     }
 
-    identify_artwork_from_fts(config, user_text).await
+    identify_artwork_from_fts(config, user_text, excluded_ids).await
 }
 
-async fn identify_artwork_from_fts(config: &Config, user_text: &str) -> Result<ArtworkDecision> {
+async fn identify_artwork_from_fts(config: &Config, user_text: &str, excluded_ids: &[i64]) -> Result<ArtworkDecision> {
     let fts_query = build_fts_query(user_text);
     info!(user_text = %user_text, fts_query = %fts_query, "built fts query");
-    let candidate_pool =
-        search_artworks_fts(&config.database.artworks_db_path, &fts_query, 10).unwrap_or_default();
-    info!(count = candidate_pool.len(), candidates = ?candidate_pool.iter().map(|a| format!("{}: {}", a.id, a.official_name)).collect::<Vec<_>>(), "fts candidates returned");
+    let candidate_pool: Vec<_> =
+        search_artworks_fts(&config.database.artworks_db_path, &fts_query, 10)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|a| !excluded_ids.contains(&a.id))
+            .collect();
+    info!(count = candidate_pool.len(), excluded = ?excluded_ids, candidates = ?candidate_pool.iter().map(|a| format!("{}: {}", a.id, a.official_name)).collect::<Vec<_>>(), "fts candidates returned");
 
     if candidate_pool.is_empty() {
         return Ok(ArtworkDecision::NoMatch);
@@ -534,28 +570,53 @@ async fn identify_artwork_from_fts(config: &Config, user_text: &str) -> Result<A
 async fn identify_artwork_from_embedding(
     config: &Config,
     user_text: &str,
+    excluded_ids: &[i64],
 ) -> Result<Option<ArtworkDecision>> {
     if user_text.trim().is_empty() {
         return Ok(None);
     }
     let embedding = embed_text_query(config, user_text).await?;
     let matches = search_artworks_by_embedding(&config.database.artworks_db_path, &embedding, 10)?;
-    info!(count = matches.len(), candidates = ?matches.iter().map(|(a, d)| format!("{}: {} @ {}", a.id, a.official_name, d)).collect::<Vec<_>>(), "embedding candidates returned");
+    info!(count = matches.len(), excluded = ?excluded_ids, candidates = ?matches.iter().map(|(a, d)| format!("{}: {} @ {}", a.id, a.official_name, d)).collect::<Vec<_>>(), "embedding candidates returned");
 
-    let Some((artwork, distance)) = matches.first() else {
+    // Filter out excluded artworks and compute scores
+    let scored: Vec<_> = matches
+        .iter()
+        .filter(|(a, _)| !excluded_ids.contains(&a.id))
+        .map(|(a, d)| {
+            let score = 1.0 / (1.0 + d);
+            (a, score)
+        })
+        .filter(|(_, score)| *score >= config.embedding.min_match_score)
+        .collect();
+
+    // Prefer highlighted artworks; fall back to non-highlighted
+    let best = scored
+        .iter()
+        .find(|(a, _)| a.is_highlight)
+        .or_else(|| scored.first());
+
+    let Some((artwork, score)) = best else {
         return Ok(None);
     };
 
-    let score = 1.0 / (1.0 + distance);
-    if score >= config.embedding.min_match_score {
-        return Ok(Some(ArtworkDecision::AutoAccept {
-            artwork: artwork.clone(),
-            confidence: score,
-            rationale: format!("top embedding match with score {:.3}", score),
-        }));
-    }
+    info!(
+        artwork_id = artwork.id,
+        artwork_name = %artwork.official_name,
+        score = score,
+        is_highlight = artwork.is_highlight,
+        "embedding auto-accept"
+    );
 
-    Ok(None)
+    Ok(Some(ArtworkDecision::AutoAccept {
+        artwork: (*artwork).clone(),
+        confidence: *score,
+        rationale: format!(
+            "embedding match with score {:.3}{}",
+            score,
+            if artwork.is_highlight { " (highlight)" } else { "" }
+        ),
+    }))
 }
 
 #[cfg(feature = "search_image")]
@@ -744,7 +805,7 @@ async fn classify_discussion_intent(
                 {
                     "role": "system",
                     "content": format!(
-                        "You are a tiny classifier for a museum bot. The current selected artwork is titled: {}. Decide whether the visitor is still discussing this artwork, or whether they are indicating that this is the wrong artwork and providing a new description that should trigger a fresh artwork search. Return strict JSON only in one of these forms: {{\"action\":\"reply\"}} or {{\"action\":\"search_artwork\",\"query\":\"short search query\"}}. Use search_artwork only when there is meaningful evidence the visitor is correcting the artwork or describing a different one. Keep query short and based mainly on the latest user message. Conversation history:\n{}",
+                        "You are a tiny classifier for a museum bot. The current selected artwork is titled: {}. Decide whether the visitor is still discussing this artwork, or whether they are indicating that this is the wrong artwork and providing a new description that should trigger a fresh artwork search. Return strict JSON only in one of these forms: {{\"action\":\"reply\"}} or {{\"action\":\"search_artwork\",\"query\":\"search query\"}}. Use search_artwork only when there is meaningful evidence the visitor is correcting the artwork or describing a different one. Build the search query by combining all relevant clues the visitor has given throughout the entire conversation — not just the latest message. Include any details about what the artwork looks like, its title, medium, or other identifying information mentioned at any point. Conversation history:\n{}",
                         artwork.official_name,
                         history.iter().map(|m| format!("{}: {}", m.role, m.content)).collect::<Vec<_>>().join("\n")
                     )

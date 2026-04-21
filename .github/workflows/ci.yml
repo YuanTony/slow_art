@@ -1,0 +1,194 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: Unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y libopus-dev
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test
+
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y libopus-dev
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build
+
+  e2e:
+    name: E2E integration test
+    runs-on: ubuntu-latest
+    needs: [build]
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y libopus-dev
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build
+
+      - name: Write test config
+        env:
+          LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+          LLM_BASE_URL: ${{ secrets.LLM_BASE_URL }}
+          LLM_MODEL: ${{ secrets.LLM_MODEL }}
+          EMBEDDING_API_KEY: ${{ secrets.EMBEDDING_API_KEY }}
+          EMBEDDING_BASE_URL: ${{ secrets.EMBEDDING_BASE_URL }}
+          EMBEDDING_MODEL: ${{ secrets.EMBEDDING_MODEL }}
+        run: |
+          if [ -z "$LLM_API_KEY" ]; then
+            echo "::warning::Skipping e2e test — LLM_API_KEY secret not configured"
+            echo "SKIP_E2E=true" >> "$GITHUB_ENV"
+            exit 0
+          fi
+          cat > config.toml <<TOML
+          [telegram]
+          enabled = false
+          bot_token = "unused"
+          poll_timeout_seconds = 30
+          download_dir = "downloads"
+
+          [discord]
+          enabled = false
+          bot_token = "unused"
+
+          [database]
+          artworks_db_path = "artworks.db"
+
+          [session]
+          countdown_minutes = 10
+          max_history_messages = 24
+          auto_accept_confidence = 0.86
+          confirm_confidence = 0.62
+          min_top_gap = 0.12
+
+          [audio_guide]
+          enabled = true
+          museum = "met"
+
+          [llm]
+          base_url = "${LLM_BASE_URL}"
+          api_key = "${LLM_API_KEY}"
+          model = "${LLM_MODEL}"
+
+          [embedding]
+          base_url = "${EMBEDDING_BASE_URL}"
+          api_key = "${EMBEDDING_API_KEY}"
+          model = "${EMBEDDING_MODEL}"
+          dimensions = 768
+          min_match_score = 0.55
+
+          [asr]
+          enabled = false
+          base_url = "http://localhost/unused"
+          api_key = "unused"
+          model = "unused"
+
+          [ocr]
+          enabled = false
+          base_url = "http://localhost/unused"
+          api_key = "unused"
+          model = "unused"
+
+          [tts]
+          enabled = false
+          base_url = "http://localhost/unused"
+          api_key = "unused"
+          model = "unused"
+          voice = "alloy"
+          format = "mp3"
+          TOML
+
+      - name: Run e2e tests
+        if: env.SKIP_E2E != 'true'
+        run: |
+          API="http://127.0.0.1:8787/debug/query"
+          PASS=0
+          FAIL=0
+
+          # Start server in background
+          ./target/debug/ten-minute-art &
+          SERVER_PID=$!
+          sleep 3
+
+          if ! kill -0 $SERVER_PID 2>/dev/null; then
+            echo "FAIL: server did not start"
+            exit 1
+          fi
+          trap "kill $SERVER_PID 2>/dev/null || true" EXIT
+
+          query() {
+            curl -sf "$API" -H "Content-Type: application/json" \
+              -d "{\"text\": \"$2\", \"conversation_id\": \"$1\"}" 2>/dev/null
+          }
+
+          assert_contains() {
+            local label="$1" response="$2" expected="$3"
+            if echo "$response" | grep -qi "$expected"; then
+              echo "PASS: $label"
+              PASS=$((PASS + 1))
+            else
+              echo "FAIL: $label (expected '$expected')"
+              echo "  Got: $response"
+              FAIL=$((FAIL + 1))
+            fi
+          }
+
+          assert_not_empty() {
+            local label="$1" response="$2"
+            if [ -n "$response" ] && echo "$response" | grep -q "replies"; then
+              echo "PASS: $label"
+              PASS=$((PASS + 1))
+            else
+              echo "FAIL: $label (empty or invalid)"
+              FAIL=$((FAIL + 1))
+            fi
+          }
+
+          echo "=== Test 1: /start ==="
+          R=$(query "t1" "/start")
+          assert_contains "opening message" "$R" "artwork"
+
+          echo "=== Test 2: Search by description ==="
+          R=$(query "t1" "I am looking at small metal object that looks like a kneeling horse")
+          echo "  Response: $(echo "$R" | head -c 200)..."
+          assert_not_empty "search returns a response" "$R"
+
+          echo "=== Test 3: Time selection ==="
+          R=$(query "t1" "5")
+          echo "  Response: $(echo "$R" | head -c 200)..."
+          assert_not_empty "time selection response" "$R"
+
+          echo "=== Test 4: Discussion ==="
+          R=$(query "t1" "What is it made of and where does it come from?")
+          echo "  Response: $(echo "$R" | head -c 200)..."
+          assert_not_empty "discussion response" "$R"
+
+          echo "=== Test 5: /new ==="
+          R=$(query "t2" "/new")
+          assert_contains "new session" "$R" "artwork"
+
+          echo "=== Test 6: Concurrent session ==="
+          R=$(query "t2" "The Great Wave")
+          echo "  Response: $(echo "$R" | head -c 200)..."
+          assert_not_empty "concurrent session responds" "$R"
+
+          echo ""
+          echo "==============================="
+          echo "Results: $PASS passed, $FAIL failed"
+          echo "==============================="
+          [ $FAIL -eq 0 ] || exit 1

@@ -4,7 +4,9 @@ CREATE TABLE IF NOT EXISTS artworks (
   official_name TEXT NOT NULL,
   search_text TEXT NOT NULL DEFAULT '',
   description TEXT NOT NULL,
-  description_level INTEGER NOT NULL DEFAULT 1
+  description_level INTEGER NOT NULL DEFAULT 1,
+  is_highlight INTEGER NOT NULL DEFAULT 0,
+  gallery_number TEXT NOT NULL DEFAULT ''
 );
 
 -- FTS5 full-text search index over searchable short fields.

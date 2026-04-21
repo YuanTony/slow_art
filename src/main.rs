@@ -237,6 +237,8 @@ mod tests {
             official_name: official_name.to_string(),
             description: "Test description".to_string(),
             description_level: 3,
+            is_highlight: false,
+            gallery_number: String::new(),
         }
     }
 
@@ -248,6 +250,7 @@ mod tests {
             started_at: std::time::Instant::now(),
             countdown_minutes: 10,
             timer_cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            rejected_artwork_ids: Vec::new(),
         }
     }
 

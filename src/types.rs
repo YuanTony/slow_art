@@ -11,6 +11,8 @@ pub struct Artwork {
     pub official_name: String,
     pub description: String,
     pub description_level: i64,
+    pub is_highlight: bool,
+    pub gallery_number: String,
 }
 
 #[derive(Debug, Clone)]
@@ -34,6 +36,7 @@ pub struct UserSession {
     pub started_at: Instant,
     pub countdown_minutes: u64,
     pub timer_cancel: Arc<AtomicBool>,
+    pub rejected_artwork_ids: Vec<i64>,
 }
 
 #[allow(dead_code)]
