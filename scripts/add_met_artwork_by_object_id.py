@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 import argparse
 import json
+import re
 import sqlite3
 import sys
 from pathlib import Path
+from urllib.error import URLError, HTTPError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
@@ -86,7 +88,81 @@ def build_met_metadata_text(obj: dict) -> str:
     return " ".join(bits)
 
 
-def build_description(object_id: int, title: str, met_metadata: str, research_report: str, level: int) -> str:
+def collect_met_image_urls(obj: dict) -> list[str]:
+    """Extract all image URLs from a Met API object."""
+    urls = []
+    for key in ["primaryImage", "primaryImageSmall"]:
+        url = (obj.get(key) or "").strip()
+        if url:
+            urls.append(url)
+    for url in obj.get("additionalImages") or []:
+        url = (url or "").strip()
+        if url:
+            urls.append(url)
+    # Deduplicate while preserving order
+    seen = set()
+    return [u for u in urls if not (u in seen or seen.add(u))]
+
+
+_URL_PATTERN = re.compile(r'https?://[^\s,;"\'\]\)}\|]+', re.IGNORECASE)
+
+
+def _check_url(url: str, timeout: int = 10) -> bool:
+    """Return True if the URL is reachable.
+
+    Only treats HTTP 404 (Not Found) and 410 (Gone) as truly dead.
+    429 (rate limited), 403, etc. are treated as alive — likely transient or
+    server-side rejection of HEAD requests, not a missing resource.
+    Tries HEAD first, then falls back to GET with a browser User-Agent.
+    """
+    safe_url = url.encode("ascii", errors="ignore").decode("ascii")
+    if not safe_url or len(safe_url) < 10:
+        return False
+
+    user_agent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
+
+    for method in ("HEAD", "GET"):
+        try:
+            req = Request(safe_url, method=method, headers={"User-Agent": user_agent})
+            with urlopen(req, timeout=timeout) as resp:
+                return resp.getcode() == 200
+        except HTTPError as e:
+            if e.code in (404, 410):
+                return False
+            return True
+        except (URLError, TimeoutError, OSError, UnicodeError, ValueError):
+            continue
+    return True
+
+
+def strip_dead_urls(description: str) -> tuple[str, int]:
+    """Validate all URLs in the description and remove dead ones.
+
+    Returns (cleaned_description, dead_count).
+    """
+    urls = _URL_PATTERN.findall(description)
+    # Deduplicate
+    seen = set()
+    unique_urls = []
+    for url in urls:
+        url = url.rstrip(".,;:)]}\"'")
+        if url not in seen:
+            seen.add(url)
+            unique_urls.append(url)
+
+    dead_count = 0
+    for url in unique_urls:
+        if not _check_url(url):
+            description = description.replace(url, "")
+            dead_count += 1
+            print(f"[validate] removed dead URL: {url}", file=sys.stderr)
+
+    # Clean up double spaces
+    description = re.sub(r"  +", " ", description)
+    return description, dead_count
+
+
+def build_description(object_id: int, title: str, met_metadata: str, research_report: str, level: int, met_image_urls: list[str] = None) -> str:
     parts = [
         f"Met object ID {object_id}.",
         f"Title: {title}.",
@@ -96,6 +172,8 @@ def build_description(object_id: int, title: str, met_metadata: str, research_re
     if research_report:
         prefix = "Deep research report:" if level == 3 else "Research report:"
         parts.append(f"{prefix} {research_report}")
+    if met_image_urls:
+        parts.append("Met image URLs: " + " ".join(met_image_urls))
     return " ".join(parts).strip()
 
 
@@ -150,13 +228,21 @@ def main():
             met_metadata=met_metadata,
         )
 
+    met_image_urls = collect_met_image_urls(obj)
+
     description = build_description(
         args.object_id,
         official_name,
         met_metadata,
         research_report,
         args.level,
+        met_image_urls,
     )
+
+    # Validate all URLs and strip dead ones
+    description, dead_count = strip_dead_urls(description)
+    if dead_count:
+        print(f"[validate] stripped {dead_count} dead URL(s) from description", file=sys.stderr)
 
     conn = sqlite3.connect(args.db)
     cur = conn.cursor()
