@@ -12,6 +12,7 @@ from urllib.request import Request, urlopen
 from research_artwork import run_agent_research, run_agent_shallow_research
 from hf_embeddings import lookup_embedding, insert_embedding, enable_vec
 from hf_metadata import lookup_display_info
+from add_met_artwork_by_object_id import strip_dead_urls
 
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_DB = ROOT / "artworks.db"
@@ -80,15 +81,35 @@ def extract_crd_id(html: str):
     return int(match.group(1)) if match else None
 
 
+def collect_met_image_urls(data: dict) -> list[str]:
+    """Extract all image URLs from a Met API response."""
+    urls = []
+    for key in ["primaryImage", "primaryImageSmall"]:
+        url = (data.get(key) or "").strip()
+        if url:
+            urls.append(url)
+    for url in data.get("additionalImages") or []:
+        url = (url or "").strip()
+        if url:
+            urls.append(url)
+    seen = set()
+    return [u for u in urls if not (u in seen or seen.add(u))]
+
+
 def fetch_met_collection_metadata(object_id: int):
-    """Fetch structured metadata from the Met Collection API for a given object ID."""
+    """Fetch structured metadata from the Met Collection API for a given object ID.
+
+    Returns (metadata_text, met_image_urls).
+    """
     url = f"https://collectionapi.metmuseum.org/public/collection/v1/objects/{object_id}"
     try:
         status, data = fetch_json(url)
         if status != 200:
-            return ""
+            return "", []
     except Exception:
-        return ""
+        return "", []
+
+    image_urls = collect_met_image_urls(data)
 
     bits = []
     for key, label in [
@@ -125,7 +146,7 @@ def fetch_met_collection_metadata(object_id: int):
     if tags:
         bits.append(f"Tags/themes: {tags}.")
 
-    return " ".join(bits)
+    return " ".join(bits), image_urls
 
 
 def looks_like_artwork(title: str, met_text: str):
@@ -189,7 +210,10 @@ def main():
     title = html_title(html) or f"Audio Stop {args.audio_id}"
     met_text = extract_met_full_text(html)
     crd_id = extract_crd_id(html)
-    met_object_meta = fetch_met_collection_metadata(crd_id) if crd_id else ""
+    if crd_id:
+        met_object_meta, met_image_urls = fetch_met_collection_metadata(crd_id)
+    else:
+        met_object_meta, met_image_urls = "", []
     if crd_id:
         hl, gn = lookup_display_info(crd_id)
         is_highlight = 1 if hl else 0
@@ -247,7 +271,14 @@ def main():
     if research_report:
         prefix = "Deep research report:" if args.level == 3 else "Research report:"
         description_parts.append(f"{prefix} {research_report}")
+    if met_image_urls:
+        description_parts.append("Met image URLs: " + " ".join(met_image_urls))
     description = " ".join(description_parts).strip()
+
+    # Validate all URLs and strip dead ones
+    description, dead_count = strip_dead_urls(description)
+    if dead_count:
+        print(f"[validate] stripped {dead_count} dead URL(s) from description", file=sys.stderr)
 
     search_text = met_object_meta
 

@@ -5,6 +5,7 @@
 /bot.pid
 /run.err
 /run.log
+/l1_to_l3_progress.log
 /config.toml
 *.parquet
 /test.db
